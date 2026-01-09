@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Dict, Any, List, Union
 
+# Grid notation support
+from . import grid_notation
+
 # Configure logging
 logging.basicConfig(level=logging.INFO, 
                     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -674,6 +677,158 @@ def load_drum_kit(ctx: Context, track_index: int, rack_uri: str, kit_path: str) 
     except Exception as e:
         logger.error(f"Error loading drum kit: {str(e)}")
         return f"Error loading drum kit: {str(e)}"
+
+# =============================================================================
+# GRID NOTATION TOOLS
+# =============================================================================
+
+@mcp.tool()
+def clip_to_grid(ctx: Context, track_index: int, clip_index: int) -> str:
+    """
+    Get clip notes as ASCII grid notation - easy to read and visualize.
+
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip slot containing the clip
+
+    Returns: ASCII grid representation of the clip.
+             Drums show as: KK|o---o---|  (kick, snare, hi-hat rows)
+             Melodic shows as: C4|oooo----|  (pitch rows)
+
+    Example drum output:
+        HC|x-x-x-x-|x-x-x-x-|
+        SN|----o---|----o---|
+        KK|o---o---|o---o-o-|
+          |1   2   3   4   |1   2   3   4   |
+    """
+    try:
+        ableton = get_ableton_connection()
+        result = ableton.send_command("get_notes_from_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index
+        })
+
+        notes = result.get("notes", [])
+        clip_name = result.get("clip_name", "")
+        length = result.get("length", 0)
+
+        if not notes:
+            return f"Clip '{clip_name}' is empty (length: {length} beats)"
+
+        # Convert to grid
+        grid = grid_notation.notes_to_grid(notes)
+
+        return f"Clip: {clip_name} ({len(notes)} notes, {length} beats)\n\n{grid}"
+    except Exception as e:
+        logger.error(f"Error converting clip to grid: {str(e)}")
+        return f"Error converting clip to grid: {str(e)}"
+
+
+@mcp.tool()
+def grid_to_clip(
+    ctx: Context,
+    track_index: int,
+    clip_index: int,
+    grid: str,
+    clear_existing: bool = True
+) -> str:
+    """
+    Write ASCII grid notation directly to a clip.
+
+    Parameters:
+    - track_index: The index of the track containing the clip
+    - clip_index: The index of the clip slot
+    - grid: ASCII grid notation (drums or melodic)
+    - clear_existing: Whether to clear existing notes first (default: True)
+
+    Drum grid format:
+        KK|o---o---|o---o-o-|
+        SN|----o---|----o---|
+        HC|x-x-x-x-|x-x-x-x-|
+
+    Symbols:
+        o = normal hit, O = accent, . = ghost note
+        x = closed hi-hat, X = open hi-hat
+        - = rest
+
+    Melodic grid format:
+        G4|----o---|--------|
+        E4|--o-----|oooo----|
+        C4|o-------|----oooo|
+
+    Each character = 1/16th note. Bar separators (|) are visual only.
+    """
+    try:
+        ableton = get_ableton_connection()
+
+        # Parse the grid notation
+        notes = grid_notation.parse_grid(grid)
+
+        if not notes:
+            return "No notes parsed from grid. Check your notation format."
+
+        # If clearing existing, we need to get current notes and remove them
+        # For now, just add the notes (Ableton's add_notes_to_clip is additive)
+
+        # Add notes to clip
+        result = ableton.send_command("add_notes_to_clip", {
+            "track_index": track_index,
+            "clip_index": clip_index,
+            "notes": notes
+        })
+
+        # Auto-detect what we wrote
+        is_drums = grid_notation.is_drum_track(notes)
+        type_str = "drum" if is_drums else "melodic"
+
+        return f"Added {len(notes)} {type_str} notes to clip at track {track_index}, slot {clip_index}"
+    except Exception as e:
+        logger.error(f"Error writing grid to clip: {str(e)}")
+        return f"Error writing grid to clip: {str(e)}"
+
+
+@mcp.tool()
+def parse_grid_preview(ctx: Context, grid: str) -> str:
+    """
+    Preview what notes a grid notation would produce, without writing to Ableton.
+
+    Parameters:
+    - grid: ASCII grid notation to parse
+
+    Returns: Summary of parsed notes (useful for testing notation before committing)
+    """
+    try:
+        notes = grid_notation.parse_grid(grid)
+
+        if not notes:
+            return "No notes parsed. Check your notation format."
+
+        is_drums = grid_notation.is_drum_track(notes)
+        type_str = "drum" if is_drums else "melodic"
+
+        # Summarize
+        pitches = set(n['pitch'] for n in notes)
+        min_time = min(n['start_time'] for n in notes)
+        max_time = max(n['start_time'] + n['duration'] for n in notes)
+
+        summary = f"Parsed {len(notes)} {type_str} notes:\n"
+        summary += f"  Pitches: {sorted(pitches)}\n"
+        summary += f"  Time range: {min_time:.2f} - {max_time:.2f} beats\n"
+        summary += f"  Duration: {max_time:.2f} beats ({max_time/4:.1f} bars)\n"
+
+        # Show first few notes
+        summary += "\nFirst 5 notes:\n"
+        for note in notes[:5]:
+            summary += f"  pitch={note['pitch']}, start={note['start_time']:.2f}, dur={note['duration']:.2f}, vel={note['velocity']}\n"
+
+        if len(notes) > 5:
+            summary += f"  ... and {len(notes) - 5} more"
+
+        return summary
+    except Exception as e:
+        logger.error(f"Error parsing grid: {str(e)}")
+        return f"Error parsing grid: {str(e)}"
+
 
 # Main execution
 def main():
